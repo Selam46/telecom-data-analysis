@@ -3,5 +3,4 @@ venv/
 __pycache__/
 *.log
 *.sqlite
-telecom_analysis_20241222_055426\data
-*.csv
+telecom_analysis_20241222_055426/data/
