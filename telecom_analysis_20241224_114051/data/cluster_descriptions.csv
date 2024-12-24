@@ -1,0 +1,4 @@
+,description
+0,"High Performance Cluster: Average throughput: 14823.45 kbps, RTT: 39.16 ms, TCP retransmission: 3374776.29 bytes"
+1,"Average Performance Cluster: Average throughput: 2203.25 kbps, RTT: 86.60 ms, TCP retransmission: 18259007.30 bytes"
+2,"Poor Performance Cluster: Average throughput: 1452.20 kbps, RTT: 22.74 ms, TCP retransmission: 21852141.09 bytes"
