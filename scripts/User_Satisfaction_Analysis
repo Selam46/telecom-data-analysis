@@ -1,0 +1,379 @@
+import os
+from dotenv import load_dotenv
+import psycopg2
+import mysql.connector
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+import seaborn as sns
+import matplotlib.pyplot as plt
+from datetime import datetime
+from scipy.spatial.distance import euclidean
+from User_Engagement_Analysis import get_user_engagement_metrics
+from UserExperienceAnalysis import get_experience_metrics
+
+def create_output_directory():
+    """Create directory for output files"""
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = f'telecom_analysis_{timestamp}'
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, 'plots'), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, 'data'), exist_ok=True)
+    return output_dir
+
+def calculate_engagement_score(user_data, least_engaged_centroid):
+    """Calculate engagement score using Euclidean distance from least engaged cluster"""
+    return euclidean(user_data, least_engaged_centroid)
+
+def calculate_experience_score(user_data, worst_experience_centroid):
+    """Calculate experience score using Euclidean distance from worst experience cluster"""
+    return euclidean(user_data, worst_experience_centroid)
+
+def get_cluster_centroids(normalized_data, labels, n_clusters):
+    """Get cluster centroids from normalized data"""
+    centroids = []
+    for i in range(n_clusters):
+        cluster_points = normalized_data[labels == i]
+        centroids.append(np.mean(cluster_points, axis=0))
+    return np.array(centroids)
+
+
+
+
+def calculate_satisfaction_scores(engagement_df, experience_df):
+    """Calculate satisfaction scores combining engagement and experience metrics"""
+    # First clean up user_ids and remove any rows with null user_ids
+    engagement_df = engagement_df.dropna(subset=['user_id'])
+    experience_df = experience_df.dropna(subset=['user_id'])
+    
+    # Convert user_ids to integers after removing nulls
+    engagement_df['user_id'] = engagement_df['user_id'].astype('int64')
+    experience_df['user_id'] = experience_df['user_id'].astype('int64')
+    
+    # Merge DataFrames on user_id
+    print(f"Engagement DataFrame rows: {len(engagement_df)}")
+    print(f"Experience DataFrame rows: {len(experience_df)}")
+    
+    merged_df = pd.merge(engagement_df, experience_df, on='user_id', how='inner')
+    print(f"Merged DataFrame rows: {len(merged_df)}")
+    
+    # Normalize engagement metrics
+    engagement_metrics = ['session_frequency', 'total_duration', 'total_traffic']
+    engagement_scaler = StandardScaler()
+    
+    # Handle any missing values in engagement metrics
+    for metric in engagement_metrics:
+        if merged_df[metric].isnull().any():
+            print(f"Filling {merged_df[metric].isnull().sum()} missing values in {metric}")
+            merged_df[metric] = merged_df[metric].fillna(merged_df[metric].mean())
+    
+    normalized_engagement = engagement_scaler.fit_transform(merged_df[engagement_metrics])
+    
+    # Handle missing values in experience metrics
+    experience_metrics = ['avg_tcp_retrans', 'avg_rtt', 'avg_throughput']
+    for metric in experience_metrics:
+        if merged_df[metric].isnull().any():
+            print(f"Filling {merged_df[metric].isnull().sum()} missing values in {metric}")
+            merged_df[metric] = merged_df[metric].fillna(merged_df[metric].mean())
+    
+    # Normalize experience metrics
+    experience_scaler = StandardScaler()
+    normalized_experience = experience_scaler.fit_transform(merged_df[experience_metrics])
+    
+    # Perform initial clustering to identify least engaged and worst experience clusters
+    engagement_kmeans = KMeans(n_clusters=3, random_state=42)
+    experience_kmeans = KMeans(n_clusters=3, random_state=42)
+    
+    engagement_clusters = engagement_kmeans.fit_predict(normalized_engagement)
+    experience_clusters = experience_kmeans.fit_predict(normalized_experience)
+    
+    # Get cluster centroids
+    engagement_centroids = get_cluster_centroids(normalized_engagement, engagement_clusters, 3)
+    experience_centroids = get_cluster_centroids(normalized_experience, experience_clusters, 3)
+    
+    # Identify least engaged and worst experience centroids
+    least_engaged_centroid = engagement_centroids[np.argmin(engagement_centroids.mean(axis=1))]
+    worst_experience_centroid = experience_centroids[np.argmin(experience_centroids.mean(axis=1))]
+    
+    # Calculate scores
+    engagement_scores = np.array([calculate_engagement_score(point, least_engaged_centroid) 
+                                for point in normalized_engagement])
+    experience_scores = np.array([calculate_experience_score(point, worst_experience_centroid) 
+                                for point in normalized_experience])
+    
+    # Normalize scores to 0-100 range
+    engagement_scores = (engagement_scores - engagement_scores.min()) / (engagement_scores.max() - engagement_scores.min()) * 100
+    experience_scores = (experience_scores - experience_scores.min()) / (experience_scores.max() - experience_scores.min()) * 100
+    
+    # Calculate satisfaction scores
+    satisfaction_scores = (engagement_scores + experience_scores) / 2
+    
+    # Create final dataframe ensuring user_ids are integers
+    result_df = pd.DataFrame({
+        'user_id': merged_df['user_id'],
+        'engagement_score': engagement_scores,
+        'experience_score': experience_scores,
+        'satisfaction_score': satisfaction_scores
+    })
+    
+    print(f"Final result DataFrame rows: {len(result_df)}")
+    
+    return result_df
+
+
+
+
+def build_satisfaction_model(scores_df, engagement_df, experience_df):
+    """Build regression model to predict satisfaction scores"""
+    # First merge all dataframes on user_id to ensure alignment
+    features_df = engagement_df[['user_id', 'session_frequency', 'total_duration', 'total_traffic']].copy()
+    features_df = features_df.merge(
+        experience_df[['user_id', 'avg_tcp_retrans', 'avg_rtt', 'avg_throughput']], 
+        on='user_id', 
+        how='inner'
+    )
+    
+    # Merge with scores to ensure perfect alignment
+    merged_data = features_df.merge(scores_df[['user_id', 'satisfaction_score']], 
+                                  on='user_id', 
+                                  how='inner')
+    
+    # Print diagnostic information
+    print(f"\nData shape after merging:")
+    print(f"Features shape: {len(merged_data)}")
+    print(f"Target shape: {len(merged_data)}")
+    
+    # Separate features and target
+    feature_columns = ['session_frequency', 'total_duration', 'total_traffic',
+                      'avg_tcp_retrans', 'avg_rtt', 'avg_throughput']
+    X = merged_data[feature_columns]
+    y = merged_data['satisfaction_score']
+    
+    # Handle any remaining missing values
+    for col in feature_columns:
+        if X[col].isnull().any():
+            print(f"Filling {X[col].isnull().sum()} missing values in {col}")
+            X[col] = X[col].fillna(X[col].mean())
+    
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    
+    # Train model
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    
+    # Evaluate model
+    y_pred = model.predict(X_test)
+    mse = mean_squared_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+    
+    # Print feature importances
+    feature_importance = pd.DataFrame({
+        'feature': feature_columns,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    print("\nFeature Importances:")
+    print(feature_importance)
+    
+    return model, {'mse': mse, 'r2': r2}
+
+
+
+def cluster_satisfaction_scores(scores_df):
+    """Perform k-means clustering on engagement and experience scores"""
+    # Prepare data for clustering
+    clustering_data = scores_df[['engagement_score', 'experience_score']]
+    
+    # Perform clustering
+    kmeans = KMeans(n_clusters=2, random_state=42)
+    clusters = kmeans.fit_predict(clustering_data)
+    
+    # Add cluster labels
+    scores_df['satisfaction_cluster'] = clusters
+    
+    return scores_df
+
+def export_to_mysql(scores_df):
+    """Export satisfaction scores to MySQL database"""
+    # Load MySQL credentials from environment variables
+    load_dotenv()
+    
+    mysql_config = {
+        'host': os.getenv('MYSQL_HOST', 'localhost'),
+        'user': os.getenv('MYSQL_USER', 'root'),
+        'password': os.getenv('MYSQL_PASSWORD', ''),
+        'database': os.getenv('MYSQL_DATABASE', 'telecom_analysis')
+    }
+    
+    try:
+        # First connect without database to create it if needed
+        conn = mysql.connector.connect(
+            host=mysql_config['host'],
+            user=mysql_config['user'],
+            password=mysql_config['password']
+        )
+        cursor = conn.cursor()
+        
+        # Create database if it doesn't exist
+        print(f"Creating database {mysql_config['database']} if it doesn't exist...")
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {mysql_config['database']}")
+        cursor.execute(f"USE {mysql_config['database']}")
+        
+        # Create table if not exists
+        print("Creating table if it doesn't exist...")
+        create_table_query = """
+        CREATE TABLE IF NOT EXISTS satisfaction_scores (
+            user_id BIGINT PRIMARY KEY,
+            engagement_score FLOAT,
+            experience_score FLOAT,
+            satisfaction_score FLOAT,
+            satisfaction_cluster INT
+        )
+        """
+        cursor.execute(create_table_query)
+        
+        # Insert data
+        print("Inserting data...")
+        insert_query = """
+        INSERT INTO satisfaction_scores 
+        (user_id, engagement_score, experience_score, satisfaction_score, satisfaction_cluster)
+        VALUES (%s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+        engagement_score = VALUES(engagement_score),
+        experience_score = VALUES(experience_score),
+        satisfaction_score = VALUES(satisfaction_score),
+        satisfaction_cluster = VALUES(satisfaction_cluster)
+        """
+        
+        # Ensure all values are properly formatted
+        values = scores_df.astype({
+            'user_id': 'int64',
+            'engagement_score': 'float64',
+            'experience_score': 'float64',
+            'satisfaction_score': 'float64',
+            'satisfaction_cluster': 'int32'
+        }).values.tolist()
+        
+        cursor.executemany(insert_query, values)
+        conn.commit()
+        
+        # Verify data
+        print("Verifying inserted data...")
+        cursor.execute("SELECT COUNT(*) FROM satisfaction_scores")
+        row_count = cursor.fetchone()[0]
+        print(f"Successfully inserted/updated {row_count} rows")
+        
+        cursor.execute("SELECT * FROM satisfaction_scores LIMIT 5")
+        verification_result = cursor.fetchall()
+        
+        return verification_result
+        
+    except mysql.connector.Error as err:
+        if err.errno == 1045:  # Access denied error
+            print("Error: Access denied. Please check your MySQL username and password.")
+            print("Make sure your .env file contains the correct credentials:")
+            print("MYSQL_USER=your_username")
+            print("MYSQL_PASSWORD=your_password")
+        elif err.errno == 2003:  # Can't connect to MySQL server
+            print("Error: Cannot connect to MySQL server. Make sure the server is running.")
+        else:
+            print(f"Error exporting to MySQL: {err}")
+        return None
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return None
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            cursor.close()
+            conn.close()
+            print("MySQL connection closed.")
+
+def plot_satisfaction_clusters(scores_df, output_dir):
+    """Plot satisfaction clusters"""
+    plt.figure(figsize=(10, 8))
+    scatter = plt.scatter(scores_df['engagement_score'], 
+                         scores_df['experience_score'],
+                         c=scores_df['satisfaction_cluster'],
+                         cmap='viridis')
+    plt.xlabel('Engagement Score')
+    plt.ylabel('Experience Score')
+    plt.title('Satisfaction Clusters')
+    plt.colorbar(scatter)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'plots', 'satisfaction_clusters.png'))
+    plt.close()
+
+def main():
+    # Create output directory
+    output_dir = create_output_directory()
+    
+    # Get engagement and experience data from previous analyses
+    print("Loading engagement and experience data...")
+    engagement_df = get_user_engagement_metrics()
+    experience_df = get_experience_metrics()
+    
+       # Print initial data shapes
+    print(f"\nInitial data shapes:")
+    print(f"Engagement data: {len(engagement_df)} rows")
+    print(f"Experience data: {len(experience_df)} rows")
+
+
+    # Calculate satisfaction scores
+    print("Calculating satisfaction scores...")
+    scores_df = calculate_satisfaction_scores(engagement_df, experience_df)
+    print(f"Satisfaction scores calculated: {len(scores_df)} rows")
+    
+    # Get top 10 satisfied customers
+    print("\nTop 10 Most Satisfied Customers:")
+    top_satisfied = scores_df.nlargest(10, 'satisfaction_score')
+    print(top_satisfied)
+    
+   # Build and evaluate prediction model
+    print("\nBuilding satisfaction prediction model...")
+    model, model_metrics = build_satisfaction_model(scores_df, engagement_df, experience_df)
+    print(f"\nModel Performance:")
+    print(f"Mean Squared Error: {model_metrics['mse']:.4f}")
+    print(f"R-squared Score: {model_metrics['r2']:.4f}")
+    
+    # Perform satisfaction clustering
+    print("\nPerforming satisfaction clustering...")
+    scores_df = cluster_satisfaction_scores(scores_df)
+    
+    # Calculate cluster averages
+    print("\nCluster Statistics:")
+    cluster_stats = scores_df.groupby('satisfaction_cluster').agg({
+        'engagement_score': 'mean',
+        'experience_score': 'mean',
+        'satisfaction_score': 'mean'
+    })
+    print(cluster_stats)
+    
+    # Export to MySQL
+    print("\nExporting results to MySQL...")
+    verification_result = export_to_mysql(scores_df)
+    if verification_result:
+        print("Data successfully exported to MySQL. Sample records:")
+        print(pd.DataFrame(verification_result, 
+                         columns=['user_id', 'engagement_score', 'experience_score', 
+                                'satisfaction_score', 'satisfaction_cluster']))
+    
+    # Create visualizations
+    plot_satisfaction_clusters(scores_df, output_dir)
+    
+    # Export results to CSV
+    scores_df.to_csv(os.path.join(output_dir, 'data', 'satisfaction_scores.csv'), index=False)
+    cluster_stats.to_csv(os.path.join(output_dir, 'data', 'satisfaction_cluster_stats.csv'))
+    
+    print(f"\nAnalysis complete! Results have been saved to: {output_dir}")
+    print("- Plots can be found in the 'plots' subdirectory")
+    print("- Data exports can be found in the 'data' subdirectory")
+
+if __name__ == "__main__":
+    main()
