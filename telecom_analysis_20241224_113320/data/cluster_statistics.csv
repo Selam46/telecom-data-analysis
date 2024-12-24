@@ -1,5 +1,0 @@
-,session_frequency,session_frequency,session_frequency,session_frequency,total_duration,total_duration,total_duration,total_duration,total_traffic,total_traffic,total_traffic,total_traffic
-,min,max,mean,sum,min,max,mean,sum,min,max,mean,sum
-cluster,,,,,,,,,,,,
-0,1,18,1.393791644830426,148935,7142.0,18553754.0,146167.1563225275,15618837656.0,33249009.0,8846226494.0,690962103.3077506,73833446511053.0
-1,1066,1066,1066.0,1066,72446396.0,72446396.0,72446396.0,72446396.0,531248944608.0,531248944608.0,531248944608.0,531248944608.0
